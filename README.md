@@ -16,6 +16,35 @@ A CLI tool that downloads and extracts ZIP files in a single streaming pass — 
 
 ## Installation
 
+### Homebrew (macOS & Linux)
+
+```sh
+brew install refo/tap/zipstream
+```
+
+### Linux / macOS (shell script)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/refo/zipstream/main/install.sh | sh
+```
+
+Or install to a custom directory:
+
+```sh
+INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/refo/zipstream/main/install.sh | sh
+```
+
+### Windows (Scoop)
+
+```powershell
+scoop bucket add refo https://github.com/refo/scoop-bucket
+scoop install zipstream
+```
+
+### Download binaries
+
+Pre-built binaries for all platforms are available on the [Releases](https://github.com/refo/zipstream/releases) page.
+
 ### Build from source
 
 Requires [Zig 0.15.2](https://ziglang.org/download/).
