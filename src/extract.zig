@@ -167,7 +167,6 @@ pub fn extract(
         const sanitized = sanitizePath(out_path, &sanitized_buf);
 
         progress.setCurrentFile(entry.filename);
-        progress.update();
 
         if (entry.is_dir) {
             output_dir.makePath(sanitized) catch |err| {
@@ -234,6 +233,9 @@ fn extractFile(
     // CRC32 computation
     var crc: std.hash.crc.Crc32IsoHdlc = .init();
 
+    // Track compressed bytes consumed for progress reporting
+    const compressed_total = entry.compressed_size;
+
     switch (entry.compression_method) {
         .store => {
             // Direct copy with CRC check
@@ -249,7 +251,10 @@ fn extractFile(
                 crc.update(buf[0..n]);
                 file.writeAll(buf[0..n]) catch return error.IoError;
                 total_read += n;
-                progress.addBytes(n);
+                // Track consumed compressed bytes
+                const consumed = compressed_total - @as(u64, @intFromEnum(limited.remaining));
+                progress.setDownloaded(consumed);
+                progress.update();
             }
         },
         .deflate => {
@@ -265,7 +270,10 @@ fn extractFile(
                 if (n == 0) break;
                 crc.update(read_buf[0..n]);
                 file.writeAll(read_buf[0..n]) catch return error.IoError;
-                progress.addBytes(n);
+                // Track consumed compressed bytes
+                const consumed = compressed_total - @as(u64, @intFromEnum(limited.remaining));
+                progress.setDownloaded(consumed);
+                progress.update();
             }
 
             // Discard any remaining bytes in the limited reader (deflate may not consume all)
