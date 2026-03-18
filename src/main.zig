@@ -1,5 +1,6 @@
 const std = @import("std");
 const extract_mod = @import("extract.zig");
+const Progress = @import("progress.zig");
 
 const Reader = std.Io.Reader;
 
@@ -7,6 +8,7 @@ const Options = struct {
     url: []const u8,
     output_dir: []const u8,
     strip_components: u32,
+    json: bool,
 };
 
 pub fn main() !void {
@@ -80,11 +82,13 @@ fn run(allocator: std.mem.Allocator, options: Options) !void {
     const body_reader: *Reader = response.reader(&transfer_buf);
 
     // Extract
+    const progress_mode: Progress.Mode = if (options.json) .json else .human;
     extract_mod.extract(
         body_reader,
         options.output_dir,
         options.strip_components,
         content_length,
+        progress_mode,
     ) catch |err| {
         return err;
     };
@@ -97,11 +101,14 @@ fn parseArgs() ?Options {
     var url: ?[]const u8 = null;
     var output_dir: []const u8 = ".";
     var strip_components: u32 = 0;
+    var json = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             printUsage();
             std.process.exit(0);
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
         } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             output_dir = args.next() orelse {
                 fatal("missing value for {s}", .{arg});
@@ -126,6 +133,7 @@ fn parseArgs() ?Options {
         .url = url.?,
         .output_dir = output_dir,
         .strip_components = strip_components,
+        .json = json,
     };
 }
 
@@ -139,6 +147,7 @@ fn printUsage() void {
         \\Options:
         \\  -o, --output <dir>          Extract to directory (default: .)
         \\  --strip-components <n>      Strip N leading path components
+        \\  --json                      Output progress as NDJSON to stderr
         \\  -h, --help                  Show this help
         \\
         \\Examples:

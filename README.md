@@ -12,6 +12,7 @@ A CLI tool that downloads and extracts ZIP files in a single streaming pass — 
 - **Auto-wrapping** — creates a containing folder when the archive has multiple top-level entries
 - **`--strip-components`** — strip leading path components (like `tar`)
 - **Progress output** to stderr with TTY-aware formatting
+- **`--json`** — NDJSON progress output for machine consumption
 
 ## Installation
 
@@ -39,6 +40,7 @@ zipstream <url> [options]
 |------|-------------|
 | `-o, --output <dir>` | Extract to directory (default: `.`) |
 | `--strip-components <n>` | Strip N leading path components |
+| `--json` | Output progress as NDJSON to stderr |
 | `-h, --help` | Show help |
 
 ### Examples
@@ -53,6 +55,25 @@ zipstream https://example.com/data.zip -o /tmp/data
 # Strip the top-level directory (common for GitHub archives)
 zipstream https://github.com/user/repo/archive/main.zip --strip-components 1 -o ./repo
 ```
+
+### JSON output
+
+With `--json`, progress is emitted as [NDJSON](https://github.com/ndjson/ndjson-spec) (one JSON object per line) to stderr:
+
+```jsonl
+{"type":"progress","file":"repo-main/large-file.bin","bytes_downloaded":65536}
+{"type":"extract","file":"repo-main/large-file.bin","bytes_downloaded":131072}
+{"type":"done","files_extracted":42,"bytes_downloaded":1048576,"output":"/tmp/out"}
+```
+
+Event types:
+- **`progress`** — periodic update during file extraction (throttled)
+- **`extract`** — file extraction completed
+- **`warning`** — non-fatal issue (unsupported compression, bad filename)
+- **`error`** — fatal error with `message` field
+- **`done`** — extraction finished successfully
+
+When `Content-Length` is available, `progress` and `extract` events include `bytes_total` and `percent` fields.
 
 ### Exit codes
 

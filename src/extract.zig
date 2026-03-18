@@ -26,15 +26,16 @@ pub fn extract(
     output_dir_path: []const u8,
     strip_components: u32,
     content_length: ?u64,
+    progress_mode: Progress.Mode,
 ) ExtractError!void {
     var zs = ZipStream.init(body_reader);
-    var progress = Progress.init(content_length);
+    var progress = Progress.init(content_length, progress_mode);
 
     // Open output directory
     var output_dir = std.fs.cwd().openDir(output_dir_path, .{}) catch {
         // Try to create it
         std.fs.cwd().makePath(output_dir_path) catch return error.IoError;
-        return extract(body_reader, output_dir_path, strip_components, content_length);
+        return extract(body_reader, output_dir_path, strip_components, content_length, progress_mode);
     };
     defer output_dir.close();
 
@@ -44,6 +45,8 @@ pub fn extract(
     var needs_wrapper = false;
     var wrapper_name_buf: [256]u8 = undefined;
     var wrapper_name_len: usize = 0;
+
+    var warn_buf: [1024]u8 = undefined;
 
     while (true) {
         const maybe_entry = zs.next() catch |err| switch (err) {
@@ -59,7 +62,7 @@ pub fn extract(
 
         // Validate filename
         if (isBadFilename(entry.filename)) {
-            printWarning("skipping bad filename: {s}\n", .{entry.filename});
+            progress.printWarning(formatWarning(&warn_buf, "skipping bad filename: {s}\n", .{entry.filename}));
             zs.skipEntry(&entry) catch |err| switch (err) {
                 error.ReadFailed => return error.ReadFailed,
                 error.EndOfStream => return error.EndOfStream,
@@ -72,10 +75,10 @@ pub fn extract(
         switch (entry.compression_method) {
             .store, .deflate => {},
             else => {
-                printWarning("skipping {s}: unsupported compression method {d}\n", .{
+                progress.printWarning(formatWarning(&warn_buf, "skipping {s}: unsupported compression method {d}\n", .{
                     entry.filename,
                     @intFromEnum(entry.compression_method),
-                });
+                }));
                 zs.skipEntry(&entry) catch |err| switch (err) {
                     error.ReadFailed => return error.ReadFailed,
                     error.EndOfStream => return error.EndOfStream,
@@ -156,7 +159,7 @@ pub fn extract(
                 wrapper_name_buf[0..wrapper_name_len],
                 stripped_name,
             }) catch {
-                printWarning("path too long: {s}\n", .{stripped_name});
+                progress.printWarning(formatWarning(&warn_buf, "path too long: {s}\n", .{stripped_name}));
                 continue;
             }
         else
@@ -170,7 +173,7 @@ pub fn extract(
 
         if (entry.is_dir) {
             output_dir.makePath(sanitized) catch |err| {
-                printWarning("failed to create directory {s}: {}\n", .{ sanitized, err });
+                progress.printWarning(formatWarning(&warn_buf, "failed to create directory {s}: {}\n", .{ sanitized, err }));
             };
             if (entry.has_data_descriptor) {
                 zs.skipEntry(&entry) catch |err| switch (err) {
@@ -185,7 +188,7 @@ pub fn extract(
         // Create parent directories
         if (std.fs.path.dirname(sanitized)) |parent| {
             output_dir.makePath(parent) catch |err| {
-                printWarning("failed to create directory {s}: {}\n", .{ parent, err });
+                progress.printWarning(formatWarning(&warn_buf, "failed to create directory {s}: {}\n", .{ parent, err }));
                 zs.skipEntry(&entry) catch |err2| switch (err2) {
                     error.ReadFailed => return error.ReadFailed,
                     error.EndOfStream => return error.EndOfStream,
@@ -215,7 +218,8 @@ fn extractFile(
 ) ExtractError!void {
     // Open output file
     var file = output_dir.createFile(path, .{}) catch {
-        printWarning("failed to create file: {s}\n", .{path});
+        var wbuf: [1024]u8 = undefined;
+        progress.printWarning(formatWarning(&wbuf, "failed to create file: {s}\n", .{path}));
         zs.skipEntry(entry) catch |err| switch (err) {
             error.ReadFailed => return error.ReadFailed,
             error.EndOfStream => return error.EndOfStream,
@@ -294,16 +298,18 @@ fn extractFile(
         // Use descriptor CRC if header CRC was 0
         const expected = if (entry.expected_crc32 == 0) descriptor_crc else entry.expected_crc32;
         if (expected != 0 and actual_crc != expected) {
-            printWarning("CRC mismatch for {s}: expected 0x{x:0>8}, got 0x{x:0>8}\n", .{
+            var crc_warn_buf: [256]u8 = undefined;
+            progress.printWarning(formatWarning(&crc_warn_buf, "CRC mismatch for {s}: expected 0x{x:0>8}, got 0x{x:0>8}\n", .{
                 entry.filename, expected, actual_crc,
-            });
+            }));
             return error.CrcMismatch;
         }
     } else {
         if (entry.expected_crc32 != 0 and actual_crc != entry.expected_crc32) {
-            printWarning("CRC mismatch for {s}: expected 0x{x:0>8}, got 0x{x:0>8}\n", .{
+            var crc_warn_buf: [256]u8 = undefined;
+            progress.printWarning(formatWarning(&crc_warn_buf, "CRC mismatch for {s}: expected 0x{x:0>8}, got 0x{x:0>8}\n", .{
                 entry.filename, entry.expected_crc32, actual_crc,
-            });
+            }));
             return error.CrcMismatch;
         }
     }
@@ -367,9 +373,6 @@ fn inferWrapperName(output_dir_path: []const u8) []const u8 {
     return "zipstream-output";
 }
 
-fn printWarning(comptime fmt: []const u8, args: anytype) void {
-    const stderr = std.fs.File.stderr();
-    var buf: [1024]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    stderr.writeAll(msg) catch {};
+fn formatWarning(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
+    return std.fmt.bufPrint(buf, fmt, args) catch "warning\n";
 }
