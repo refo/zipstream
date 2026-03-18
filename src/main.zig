@@ -16,7 +16,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const options = parseArgs() orelse {
+    const options = parseArgs(allocator) orelse {
         printUsage();
         std.process.exit(1);
     };
@@ -94,8 +94,11 @@ fn run(allocator: std.mem.Allocator, options: Options) !void {
     };
 }
 
-fn parseArgs() ?Options {
-    var args = std.process.args();
+fn parseArgs(allocator: std.mem.Allocator) ?Options {
+    var args = std.process.argsWithAllocator(allocator) catch {
+        fatal("failed to read command-line arguments", .{});
+    };
+    defer args.deinit();
     _ = args.skip(); // program name
 
     var url: ?[]const u8 = null;
