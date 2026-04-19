@@ -9,7 +9,7 @@ A CLI tool that downloads and extracts ZIP files in a single streaming pass — 
 - **CRC32 verification** for data integrity
 - **Zip64** support for large archives
 - **Path traversal protection** — rejects `../` and absolute paths
-- **Auto-wrapping** — creates a containing folder when the archive has multiple top-level entries
+- **Smart wrapping** — when extracting to the current directory, archives with multiple top-level entries are wrapped in a folder named after the archive. Disable with `--no-wrap`; force with `--wrap`. Supplying `-o <dir>` never auto-wraps.
 - **`--strip-components`** — strip leading path components (like `tar`)
 - **Progress output** to stderr with TTY-aware formatting
 - **`--json`** — NDJSON progress output for machine consumption
@@ -69,6 +69,8 @@ zipstream <url> [options]
 |------|-------------|
 | `-o, --output <dir>` | Extract to directory (default: `.`) |
 | `--strip-components <n>` | Strip N leading path components |
+| `--wrap` | Always wrap entries in a generated directory |
+| `--no-wrap` | Never wrap entries (extract directly) |
 | `--json` | Output progress as NDJSON to stderr |
 | `-h, --help` | Show help |
 
@@ -103,6 +105,23 @@ Event types:
 - **`done`** — extraction finished successfully
 
 When `Content-Length` is available, `progress` and `extract` events include `bytes_total` and `percent` fields.
+
+### Auto-wrapping
+
+By default, `zipstream` wraps extracted entries in a containing directory only when **both**:
+
+1. you are extracting into the current working directory (no `-o` flag), and
+2. the archive has multiple top-level entries.
+
+Pass `--wrap` to always wrap, or `--no-wrap` to never wrap. `--wrap` and `--no-wrap` are mutually exclusive.
+
+The wrapper directory name is derived in this order:
+
+1. The `filename=` field of the `Content-Disposition` response header (if present), with `.zip` stripped
+2. The last path segment of the URL, with query string and `.zip` stripped
+3. `zipstream-YYYYMMDD-HHMMSS` (UTC)
+
+If the chosen name collides with an existing directory, a numeric suffix (`-1`, `-2`, ...) is appended.
 
 ### Exit codes
 

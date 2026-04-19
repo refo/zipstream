@@ -9,6 +9,7 @@ const Options = struct {
     output_dir: []const u8,
     strip_components: u32,
     json: bool,
+    wrap_mode: extract_mod.WrapMode,
 };
 
 pub fn main() !void {
@@ -77,6 +78,14 @@ fn run(allocator: std.mem.Allocator, options: Options) !void {
 
     const content_length = response.head.content_length;
 
+    const content_disposition_raw: ?[]const u8 = blk: {
+        var it = response.head.iterateHeaders();
+        while (it.next()) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "content-disposition")) break :blk h.value;
+        }
+        break :blk null;
+    };
+
     // Get body reader (raw, no decompression)
     var transfer_buf: [16384]u8 = undefined;
     const body_reader: *Reader = response.reader(&transfer_buf);
@@ -89,6 +98,9 @@ fn run(allocator: std.mem.Allocator, options: Options) !void {
         options.strip_components,
         content_length,
         progress_mode,
+        options.wrap_mode,
+        options.url,
+        content_disposition_raw,
     ) catch |err| {
         return err;
     };
@@ -105,6 +117,8 @@ fn parseArgs(allocator: std.mem.Allocator) ?Options {
     var output_dir: []const u8 = ".";
     var strip_components: u32 = 0;
     var json = false;
+    var wrap_flag = false;
+    var no_wrap_flag = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -112,6 +126,10 @@ fn parseArgs(allocator: std.mem.Allocator) ?Options {
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+        } else if (std.mem.eql(u8, arg, "--wrap")) {
+            wrap_flag = true;
+        } else if (std.mem.eql(u8, arg, "--no-wrap")) {
+            no_wrap_flag = true;
         } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             output_dir = args.next() orelse {
                 fatal("missing value for {s}", .{arg});
@@ -132,11 +150,19 @@ fn parseArgs(allocator: std.mem.Allocator) ?Options {
 
     if (url == null) return null;
 
+    if (wrap_flag and no_wrap_flag) {
+        fatal("--wrap and --no-wrap are mutually exclusive", .{});
+    }
+
+    const wrap_mode: extract_mod.WrapMode =
+        if (wrap_flag) .always else if (no_wrap_flag) .never else .auto;
+
     return Options{
         .url = url.?,
         .output_dir = output_dir,
         .strip_components = strip_components,
         .json = json,
+        .wrap_mode = wrap_mode,
     };
 }
 
@@ -150,6 +176,8 @@ fn printUsage() void {
         \\Options:
         \\  -o, --output <dir>          Extract to directory (default: .)
         \\  --strip-components <n>      Strip N leading path components
+        \\  --wrap                      Always wrap entries in a generated directory
+        \\  --no-wrap                   Never wrap entries (extract directly)
         \\  --json                      Output progress as NDJSON to stderr
         \\  -h, --help                  Show this help
         \\
