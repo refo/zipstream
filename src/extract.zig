@@ -432,6 +432,80 @@ fn extractCdFilename(header: []const u8) []const u8 {
     return rest[0..end];
 }
 
+/// Sanitize a candidate wrapper name into `out`. Returns the byte length
+/// written, or null if the sanitized result is empty.
+///
+/// - `/`, `\`, NUL become `-`
+/// - Bytes below 0x20 and 0x7f are dropped
+/// - Leading/trailing whitespace and `.` are trimmed
+/// - Result is capped at `max_wrapper_name_len` bytes
+fn sanitizeWrapperName(name: []const u8, out: []u8) ?usize {
+    var written: usize = 0;
+    for (name) |c| {
+        if (written == out.len) break;
+        const mapped: ?u8 = switch (c) {
+            '/', '\\', 0 => '-',
+            0x01...0x1f, 0x7f => null,
+            else => c,
+        };
+        if (mapped) |m| {
+            out[written] = m;
+            written += 1;
+        }
+    }
+
+    // Trim trailing whitespace and dots.
+    while (written > 0) {
+        const c = out[written - 1];
+        if (c == ' ' or c == '\t' or c == '.') written -= 1 else break;
+    }
+
+    // Trim leading whitespace and dots by shifting.
+    var start: usize = 0;
+    while (start < written) {
+        const c = out[start];
+        if (c == ' ' or c == '\t' or c == '.') start += 1 else break;
+    }
+    if (start > 0 and start < written) {
+        const len = written - start;
+        std.mem.copyForwards(u8, out[0..len], out[start..written]);
+        written = len;
+    } else if (start >= written) {
+        written = 0;
+    }
+
+    if (written == 0) return null;
+    return written;
+}
+
+test "sanitizeWrapperName replaces separators and strips control chars" {
+    var buf: [max_wrapper_name_len]u8 = undefined;
+
+    const n1 = sanitizeWrapperName("hello/world", &buf).?;
+    try std.testing.expectEqualStrings("hello-world", buf[0..n1]);
+
+    const n2 = sanitizeWrapperName("a\\b", &buf).?;
+    try std.testing.expectEqualStrings("a-b", buf[0..n2]);
+
+    const n3 = sanitizeWrapperName("x\x01y\x7fz", &buf).?;
+    try std.testing.expectEqualStrings("xyz", buf[0..n3]);
+
+    const n4 = sanitizeWrapperName("  .name.  ", &buf).?;
+    try std.testing.expectEqualStrings("name", buf[0..n4]);
+
+    try std.testing.expect(sanitizeWrapperName("", &buf) == null);
+    try std.testing.expect(sanitizeWrapperName("   ", &buf) == null);
+    try std.testing.expect(sanitizeWrapperName("....", &buf) == null);
+}
+
+test "sanitizeWrapperName truncates to max_wrapper_name_len bytes" {
+    var buf: [max_wrapper_name_len]u8 = undefined;
+    var input: [512]u8 = undefined;
+    @memset(&input, 'a');
+    const n = sanitizeWrapperName(&input, &buf).?;
+    try std.testing.expectEqual(max_wrapper_name_len, n);
+}
+
 test "stripZipSuffix removes .zip case-insensitively" {
     try std.testing.expectEqualStrings("data", stripZipSuffix("data.zip"));
     try std.testing.expectEqualStrings("data", stripZipSuffix("data.ZIP"));
