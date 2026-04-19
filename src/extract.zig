@@ -21,6 +21,21 @@ pub const ExtractError = error{
     DecompressError,
 };
 
+pub const WrapMode = enum { auto, always, never };
+
+/// Maximum bytes for a derived wrapper directory name.
+pub const max_wrapper_name_len: usize = 255;
+
+/// Result of resolving a wrapper name. `len` is the number of valid bytes in `buf`.
+pub const WrapperName = struct {
+    buf: [max_wrapper_name_len]u8,
+    len: usize,
+
+    pub fn slice(self: *const WrapperName) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 pub fn extract(
     body_reader: *Reader,
     output_dir_path: []const u8,
