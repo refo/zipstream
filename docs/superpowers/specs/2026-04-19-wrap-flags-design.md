@@ -43,7 +43,7 @@ When wrapping, resolve the wrapper directory name via this chain (first success 
 
 1. **`Content-Disposition` filename**: if the HTTP response contains `Content-Disposition: attachment; filename="..."`, use that value with any `.zip` / `.ZIP` suffix stripped.
 2. **URL path basename**: take the final path segment of the URL (ignoring query string and fragment), strip any `.zip` / `.ZIP` suffix. Use if non-empty.
-3. **Timestamp fallback**: `zipstream-YYYYMMDD-HHMMSS` using local time.
+3. **Timestamp fallback**: `zipstream-YYYYMMDD-HHMMSS` in UTC (portable; avoids a timezone-data dependency).
 
 ### Sanitization
 
