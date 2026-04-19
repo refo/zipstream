@@ -391,3 +391,70 @@ fn inferWrapperName(output_dir_path: []const u8) []const u8 {
 fn formatWarning(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, fmt, args) catch "warning\n";
 }
+
+fn stripZipSuffix(name: []const u8) []const u8 {
+    if (name.len < 4) return name;
+    const tail = name[name.len - 4 ..];
+    if (std.ascii.eqlIgnoreCase(tail, ".zip")) {
+        return name[0 .. name.len - 4];
+    }
+    return name;
+}
+
+fn urlBasename(url: []const u8) []const u8 {
+    // Strip fragment then query.
+    var s = url;
+    if (std.mem.indexOfScalar(u8, s, '#')) |i| s = s[0..i];
+    if (std.mem.indexOfScalar(u8, s, '?')) |i| s = s[0..i];
+    // Trim scheme for clarity; find last '/'.
+    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| {
+        return s[i + 1 ..];
+    }
+    return s;
+}
+
+/// Very small RFC 6266 parser. Handles `filename=value` and `filename="value"`.
+/// Ignores RFC 5987 `filename*=` forms (returns empty).
+fn extractCdFilename(header: []const u8) []const u8 {
+    const needle = "filename=";
+    const idx = std.ascii.indexOfIgnoreCase(header, needle) orelse return "";
+    // Reject the `filename*=` variant.
+    if (idx > 0 and header[idx - 1] == '*') return "";
+    var rest = header[idx + needle.len ..];
+    if (rest.len == 0) return "";
+    if (rest[0] == '"') {
+        rest = rest[1..];
+        const end = std.mem.indexOfScalar(u8, rest, '"') orelse return "";
+        return rest[0..end];
+    }
+    // Unquoted: terminate at `;` or whitespace.
+    const end = std.mem.indexOfAny(u8, rest, "; \t") orelse rest.len;
+    return rest[0..end];
+}
+
+test "stripZipSuffix removes .zip case-insensitively" {
+    try std.testing.expectEqualStrings("data", stripZipSuffix("data.zip"));
+    try std.testing.expectEqualStrings("data", stripZipSuffix("data.ZIP"));
+    try std.testing.expectEqualStrings("data.tar", stripZipSuffix("data.tar"));
+    try std.testing.expectEqualStrings("", stripZipSuffix(".zip"));
+    try std.testing.expectEqualStrings("", stripZipSuffix(""));
+}
+
+test "urlBasename returns final path segment without query or fragment" {
+    try std.testing.expectEqualStrings("data.zip", urlBasename("https://example.com/data.zip"));
+    try std.testing.expectEqualStrings("29796857.zip", urlBasename("https://s66.put.io/zipstream/29796857.zip?oauth_token=ABC"));
+    try std.testing.expectEqualStrings("filename.zip", urlBasename("https://site.com/path/to/filename.zip?a=b&c=d"));
+    try std.testing.expectEqualStrings("file.zip", urlBasename("https://example.com/file.zip#section"));
+    try std.testing.expectEqualStrings("", urlBasename("https://example.com/"));
+    try std.testing.expectEqualStrings("", urlBasename(""));
+    try std.testing.expectEqualStrings("bare", urlBasename("bare"));
+}
+
+test "extractCdFilename parses RFC 6266 filename= form" {
+    try std.testing.expectEqualStrings("movie.zip", extractCdFilename("attachment; filename=\"movie.zip\""));
+    try std.testing.expectEqualStrings("movie.zip", extractCdFilename("attachment; filename=movie.zip"));
+    try std.testing.expectEqualStrings("a b.zip", extractCdFilename("attachment; filename=\"a b.zip\""));
+    try std.testing.expectEqualStrings("", extractCdFilename("inline"));
+    try std.testing.expectEqualStrings("", extractCdFilename("attachment; filename*=UTF-8''movie.zip"));
+    try std.testing.expectEqualStrings("", extractCdFilename(""));
+}
