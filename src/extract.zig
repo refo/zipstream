@@ -42,6 +42,9 @@ pub fn extract(
     strip_components: u32,
     content_length: ?u64,
     progress_mode: Progress.Mode,
+    wrap_mode: WrapMode,
+    url: []const u8,
+    content_disposition: ?[]const u8,
 ) ExtractError!void {
     var zs = ZipStream.init(body_reader);
     var progress = Progress.init(content_length, progress_mode);
@@ -50,7 +53,7 @@ pub fn extract(
     var output_dir = std.fs.cwd().openDir(output_dir_path, .{}) catch {
         // Try to create it
         std.fs.cwd().makePath(output_dir_path) catch return error.IoError;
-        return extract(body_reader, output_dir_path, strip_components, content_length, progress_mode);
+        return extract(body_reader, output_dir_path, strip_components, content_length, progress_mode, wrap_mode, url, content_disposition);
     };
     defer output_dir.close();
 
@@ -58,7 +61,7 @@ pub fn extract(
     var first_root: ?[256]u8 = null;
     var first_root_len: usize = 0;
     var needs_wrapper = false;
-    var wrapper_name_buf: [256]u8 = undefined;
+    var wrapper_name_buf: [260]u8 = undefined;
     var wrapper_name_len: usize = 0;
 
     var warn_buf: [1024]u8 = undefined;
@@ -127,7 +130,7 @@ pub fn extract(
             continue;
         }
 
-        // Top-level folder detection (only when strip_components == 0)
+        // Wrap-mode bookkeeping (only meaningful when strip_components == 0).
         if (strip_components == 0) {
             const root = getFirstComponent(entry.filename);
             if (first_root == null) {
@@ -137,29 +140,33 @@ pub fn extract(
                     first_root = buf;
                     first_root_len = root.len;
                 }
+
+                // For `.always` mode we wrap immediately on the first entry.
+                if (wrap_mode == .always and !needs_wrapper) {
+                    if (initWrapper(output_dir, url, content_disposition, &wrapper_name_buf, &wrapper_name_len)) {
+                        needs_wrapper = true;
+                        // Note: the first entry has not been extracted yet at
+                        // this point, so no rename is required here.
+                    }
+                }
             } else if (!needs_wrapper) {
                 const fr = first_root.?;
-                if (!std.mem.eql(u8, fr[0..first_root_len], root)) {
-                    // Multiple top-level entries — need a wrapper directory
-                    needs_wrapper = true;
-                    const basename = inferWrapperName(output_dir_path);
-                    if (basename.len <= wrapper_name_buf.len) {
-                        @memcpy(wrapper_name_buf[0..basename.len], basename);
-                        wrapper_name_len = basename.len;
-                        output_dir.makeDir(wrapper_name_buf[0..wrapper_name_len]) catch {};
-                        // Move previously extracted first_root into wrapper
+                const differs = !std.mem.eql(u8, fr[0..first_root_len], root);
+                const should_auto_wrap =
+                    wrap_mode == .auto and std.mem.eql(u8, output_dir_path, ".") and differs;
+                if (should_auto_wrap) {
+                    if (initWrapper(output_dir, url, content_disposition, &wrapper_name_buf, &wrapper_name_len)) {
+                        needs_wrapper = true;
+                        // Move previously extracted first_root into wrapper.
                         const first = fr[0..first_root_len];
-                        // Build source and dest paths for rename
                         var src_buf: [512]u8 = undefined;
                         var dst_buf: [512]u8 = undefined;
                         const src_path = std.fmt.bufPrint(&src_buf, "{s}", .{first}) catch first;
                         const wrapper = wrapper_name_buf[0..wrapper_name_len];
                         const dst_path = std.fmt.bufPrint(&dst_buf, "{s}/{s}", .{ wrapper, first }) catch {
-                            // If we can't build the path, just skip the move
                             continue;
                         };
                         output_dir.rename(src_path, dst_path) catch {
-                            // Rename failed, try without wrapper
                             needs_wrapper = false;
                         };
                     }
@@ -383,11 +390,6 @@ fn sanitizePath(path: []const u8, buf: []u8) []const u8 {
     return buf[0..len];
 }
 
-fn inferWrapperName(output_dir_path: []const u8) []const u8 {
-    _ = output_dir_path;
-    return "zipstream-output";
-}
-
 /// Resolve a wrapper directory name using the following chain:
 /// 1. `content_disposition` filename (if provided), with `.zip`/`.ZIP` stripped
 /// 2. URL path basename, with query/fragment removed and `.zip`/`.ZIP` stripped
@@ -424,7 +426,9 @@ pub fn resolveWrapperName(
 
     // Timestamp fallback: zipstream-YYYYMMDD-HHMMSS in UTC (portable; no
     // dependency on local timezone data).
-    const ts = std.fmt.bufPrint(&out.buf, "zipstream-{s}", .{formatTimestamp(now_unix_seconds)}) catch {
+    var ts_buf: [16]u8 = undefined;
+    const ts_str = formatTimestamp(now_unix_seconds, &ts_buf);
+    const ts = std.fmt.bufPrint(&out.buf, "zipstream-{s}", .{ts_str}) catch {
         const literal = "zipstream-output";
         @memcpy(out.buf[0..literal.len], literal);
         out.len = literal.len;
@@ -434,19 +438,16 @@ pub fn resolveWrapperName(
     return out;
 }
 
-/// Format a UTC timestamp (`seconds` since unix epoch) as `YYYYMMDD-HHMMSS`.
-/// Returns a static buffer; caller must consume immediately.
-fn formatTimestamp(seconds: i64) []const u8 {
-    const S = struct {
-        threadlocal var buf: [16]u8 = undefined;
-    };
+/// Format a UTC timestamp (`seconds` since unix epoch) as `YYYYMMDD-HHMMSS`
+/// into the caller-supplied buffer. Returns the written slice.
+fn formatTimestamp(seconds: i64, out: []u8) []const u8 {
     const ep_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(seconds) };
     const day_secs = ep_secs.getDaySeconds();
     const ep_day = ep_secs.getEpochDay();
     const year_day = ep_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
 
-    const out = std.fmt.bufPrint(&S.buf, "{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}", .{
+    const written = std.fmt.bufPrint(out, "{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}", .{
         @as(u32, year_day.year),
         @as(u32, month_day.month.numeric()),
         @as(u32, month_day.day_index + 1),
@@ -454,7 +455,67 @@ fn formatTimestamp(seconds: i64) []const u8 {
         @as(u32, day_secs.getMinutesIntoHour()),
         @as(u32, day_secs.getSecondsIntoMinute()),
     }) catch return "";
-    return out;
+    return written;
+}
+
+pub const WrapperAllocError = error{
+    IoError,
+    NameTooLong,
+    TooManyCollisions,
+};
+
+/// Create a wrapper directory under `parent` using `base` as the preferred name.
+/// On collision, append `-1`, `-2`, ..., up to `-99`. Returns a slice of
+/// `out_buf` holding the final name.
+fn allocateWrapperDir(
+    parent: std.fs.Dir,
+    base: []const u8,
+    out_buf: []u8,
+) WrapperAllocError![]const u8 {
+    if (base.len > out_buf.len) return error.NameTooLong;
+
+    // Try `base` first.
+    @memcpy(out_buf[0..base.len], base);
+    if (tryMakeDir(parent, out_buf[0..base.len])) |_| {
+        return out_buf[0..base.len];
+    } else |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return error.IoError,
+    }
+
+    var i: u32 = 1;
+    while (i <= 99) : (i += 1) {
+        const candidate = std.fmt.bufPrint(out_buf, "{s}-{d}", .{ base, i }) catch return error.NameTooLong;
+        if (tryMakeDir(parent, candidate)) |_| {
+            return candidate;
+        } else |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return error.IoError,
+        }
+    }
+    return error.TooManyCollisions;
+}
+
+fn tryMakeDir(parent: std.fs.Dir, name: []const u8) std.fs.Dir.MakeError!void {
+    try parent.makeDir(name);
+}
+
+/// Resolve a wrapper name, create the directory (with collision suffixing),
+/// and copy the final name into `name_buf`. Returns true on success.
+fn initWrapper(
+    output_dir: std.fs.Dir,
+    url: []const u8,
+    content_disposition: ?[]const u8,
+    name_buf: *[260]u8,
+    name_len: *usize,
+) bool {
+    const resolved = resolveWrapperName(url, content_disposition, std.time.timestamp());
+    var alloc_buf: [max_wrapper_name_len + 4]u8 = undefined;
+    const final = allocateWrapperDir(output_dir, resolved.slice(), &alloc_buf) catch return false;
+    if (final.len > name_buf.len) return false;
+    @memcpy(name_buf[0..final.len], final);
+    name_len.* = final.len;
+    return true;
 }
 
 fn formatWarning(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
@@ -577,7 +638,8 @@ test "sanitizeWrapperName truncates to max_wrapper_name_len bytes" {
 
 test "formatTimestamp produces YYYYMMDD-HHMMSS" {
     // 2026-04-21 16:30:22 UTC => unix seconds 1776789022
-    const s = formatTimestamp(1776789022);
+    var buf: [16]u8 = undefined;
+    const s = formatTimestamp(1776789022, &buf);
     try std.testing.expectEqualStrings("20260421-163022", s);
 }
 
@@ -638,4 +700,21 @@ test "extractCdFilename parses RFC 6266 filename= form" {
     try std.testing.expectEqualStrings("", extractCdFilename("inline"));
     try std.testing.expectEqualStrings("", extractCdFilename("attachment; filename*=UTF-8''movie.zip"));
     try std.testing.expectEqualStrings("", extractCdFilename(""));
+}
+
+test "allocateWrapperDir appends -1, -2 when directory exists" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Pre-create "data" and "data-1".
+    try tmp.dir.makeDir("data");
+    try tmp.dir.makeDir("data-1");
+
+    var name_buf: [max_wrapper_name_len + 4]u8 = undefined;
+    const final = try allocateWrapperDir(tmp.dir, "data", &name_buf);
+    try std.testing.expectEqualStrings("data-2", final);
+
+    // Verify the directory was created.
+    var opened = try tmp.dir.openDir("data-2", .{});
+    opened.close();
 }
