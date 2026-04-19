@@ -388,6 +388,75 @@ fn inferWrapperName(output_dir_path: []const u8) []const u8 {
     return "zipstream-output";
 }
 
+/// Resolve a wrapper directory name using the following chain:
+/// 1. `content_disposition` filename (if provided), with `.zip`/`.ZIP` stripped
+/// 2. URL path basename, with query/fragment removed and `.zip`/`.ZIP` stripped
+/// 3. Timestamp fallback `zipstream-YYYYMMDD-HHMMSS`
+///
+/// Each candidate is sanitized; if the sanitized result is empty the resolver
+/// falls through to the next tier.
+pub fn resolveWrapperName(
+    url: []const u8,
+    content_disposition: ?[]const u8,
+    now_unix_seconds: i64,
+) WrapperName {
+    var out: WrapperName = .{ .buf = undefined, .len = 0 };
+
+    if (content_disposition) |cd| {
+        const raw = extractCdFilename(cd);
+        if (raw.len > 0) {
+            const trimmed = stripZipSuffix(raw);
+            if (sanitizeWrapperName(trimmed, &out.buf)) |n| {
+                out.len = n;
+                return out;
+            }
+        }
+    }
+
+    const url_base = urlBasename(url);
+    if (url_base.len > 0) {
+        const trimmed = stripZipSuffix(url_base);
+        if (sanitizeWrapperName(trimmed, &out.buf)) |n| {
+            out.len = n;
+            return out;
+        }
+    }
+
+    // Timestamp fallback: zipstream-YYYYMMDD-HHMMSS in UTC (portable; no
+    // dependency on local timezone data).
+    const ts = std.fmt.bufPrint(&out.buf, "zipstream-{s}", .{formatTimestamp(now_unix_seconds)}) catch {
+        const literal = "zipstream-output";
+        @memcpy(out.buf[0..literal.len], literal);
+        out.len = literal.len;
+        return out;
+    };
+    out.len = ts.len;
+    return out;
+}
+
+/// Format a UTC timestamp (`seconds` since unix epoch) as `YYYYMMDD-HHMMSS`.
+/// Returns a static buffer; caller must consume immediately.
+fn formatTimestamp(seconds: i64) []const u8 {
+    const S = struct {
+        threadlocal var buf: [16]u8 = undefined;
+    };
+    const ep_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(seconds) };
+    const day_secs = ep_secs.getDaySeconds();
+    const ep_day = ep_secs.getEpochDay();
+    const year_day = ep_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+
+    const out = std.fmt.bufPrint(&S.buf, "{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}", .{
+        @as(u32, year_day.year),
+        @as(u32, month_day.month.numeric()),
+        @as(u32, month_day.day_index + 1),
+        @as(u32, day_secs.getHoursIntoDay()),
+        @as(u32, day_secs.getMinutesIntoHour()),
+        @as(u32, day_secs.getSecondsIntoMinute()),
+    }) catch return "";
+    return out;
+}
+
 fn formatWarning(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, fmt, args) catch "warning\n";
 }
@@ -504,6 +573,44 @@ test "sanitizeWrapperName truncates to max_wrapper_name_len bytes" {
     @memset(&input, 'a');
     const n = sanitizeWrapperName(&input, &buf).?;
     try std.testing.expectEqual(max_wrapper_name_len, n);
+}
+
+test "formatTimestamp produces YYYYMMDD-HHMMSS" {
+    // 2026-04-21 16:30:22 UTC => unix seconds 1776789022
+    const s = formatTimestamp(1776789022);
+    try std.testing.expectEqualStrings("20260421-163022", s);
+}
+
+test "resolveWrapperName prefers Content-Disposition over URL" {
+    const r = resolveWrapperName(
+        "https://s66.put.io/zipstream/29796857.zip?oauth_token=ABC",
+        "attachment; filename=\"Movie.Title.2024.zip\"",
+        0,
+    );
+    try std.testing.expectEqualStrings("Movie.Title.2024", r.slice());
+}
+
+test "resolveWrapperName falls back to URL basename" {
+    const r = resolveWrapperName(
+        "https://example.com/path/cool-data.zip?x=1",
+        null,
+        0,
+    );
+    try std.testing.expectEqualStrings("cool-data", r.slice());
+}
+
+test "resolveWrapperName uses numeric URL basename when that is all we have" {
+    const r = resolveWrapperName(
+        "https://s66.put.io/zipstream/29796857.zip?oauth_token=ABC",
+        null,
+        0,
+    );
+    try std.testing.expectEqualStrings("29796857", r.slice());
+}
+
+test "resolveWrapperName falls back to timestamp when URL is useless" {
+    const r = resolveWrapperName("https://example.com/", null, 1776789022);
+    try std.testing.expectEqualStrings("zipstream-20260421-163022", r.slice());
 }
 
 test "stripZipSuffix removes .zip case-insensitively" {
